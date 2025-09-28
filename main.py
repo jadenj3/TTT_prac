@@ -117,14 +117,10 @@ def configure_trainable_parameters(model):
     return trainable
 
 
-def run_test_time_training(model, tokenizer, samples, steps=3, lr=1e-5, grad_clip=1.0):
+def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_clip=0.5):
     model.train()
     model.config.use_cache = False
     trainable = configure_trainable_parameters(model)
-    model.lm_head = model.lm_head.to(torch.float32)
-    for param in trainable:
-        param.data = param.data.float()
-
     optimizer = optim.AdamW(trainable, lr=lr, eps=1e-8)
 
     for step in range(steps):
@@ -138,15 +134,15 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=1e-5, grad_cli
 
             optimizer.zero_grad(set_to_none=True)
             outputs = model(**batch)
-            loss = outputs.loss.float()
-            if torch.isnan(loss) or torch.isinf(loss):
+            loss = outputs.loss
+            if not torch.isfinite(loss).all():
                 print("Skipping update due to invalid loss")
                 continue
             loss.backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(trainable, max_norm=grad_clip)
             optimizer.step()
-            total_loss += loss.item()
+            total_loss += float(loss.detach().cpu())
 
         average_loss = total_loss / max(1, len(samples))
         print(f"TTT step {step + 1}: average loss = {average_loss:.4f}")
