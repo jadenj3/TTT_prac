@@ -4,7 +4,7 @@ from torch import optim
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 CKPT = "Qwen/Qwen2.5-7B-Instruct"
-LOAD_DTYPE = torch.float16
+LOAD_DTYPE = torch.float32
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SYSTEM_MESSAGE = (
     "You are a concise tutor helping players learn the expedition glossary. "
