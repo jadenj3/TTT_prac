@@ -43,13 +43,6 @@ def load_model_and_tokenizer():
     )
     model.to(DEVICE)
     model.config.pad_token_id = tokenizer.pad_token_id
-
-    if hasattr(model, "gradient_checkpointing_enable"):
-        try:
-            model.gradient_checkpointing_enable(use_reentrant=False)
-        except TypeError:
-            model.gradient_checkpointing_enable()
-
     return tokenizer, model
 
 
@@ -129,14 +122,10 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
     model.config.use_cache = False
     trainable = configure_trainable_parameters(model)
     optimizer = optim.AdamW(trainable, lr=lr)
-    scaler = (
-        torch.amp.GradScaler('cuda', enabled=True)
-        if DEVICE.type == "cuda"
-        else None
-    )
+    use_autocast = DEVICE.type == "cuda" and LOAD_DTYPE in (torch.float16, torch.bfloat16)
     autocast_ctx = (
         torch.amp.autocast("cuda", dtype=LOAD_DTYPE)
-        if DEVICE.type == "cuda"
+        if use_autocast
         else nullcontext()
     )
 
@@ -153,13 +142,8 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
             with autocast_ctx:
                 outputs = model(**batch)
                 loss = outputs.loss
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
+            loss.backward()
+            optimizer.step()
             total_loss += loss.item()
 
         average_loss = total_loss / len(samples)
