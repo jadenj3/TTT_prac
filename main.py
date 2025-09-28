@@ -3,16 +3,19 @@ from contextlib import nullcontext
 
 import torch
 from torch import optim
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    GenerationConfig,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 try:
     from transformers import BitsAndBytesConfig
-except ImportError:  # pragma: no cover - bitsandbytes optional
+except ImportError:  # pragma: no cover - optional dependency
     BitsAndBytesConfig = None  # type: ignore[assignment]
+
+try:
+    import bitsandbytes as bnb  # noqa: F401
+except ImportError:  # pragma: no cover - optional dependency
+    BITSANDBYTES_AVAILABLE = False
+else:
+    BITSANDBYTES_AVAILABLE = True
 
 # -----------------------------------------------------------------------------
 # Configuration knobs (tweak these to fit your Colab runtime)
@@ -23,6 +26,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_4BIT = (
     DEVICE.type == "cuda"
     and BitsAndBytesConfig is not None
+    and BITSANDBYTES_AVAILABLE
     and os.environ.get("TTT_FORCE_16BIT", "0") != "1"
 )
 SYSTEM_MESSAGE = (
@@ -66,8 +70,14 @@ def load_model_and_tokenizer():
         model_kwargs["quantization_config"] = quant_config
         model_kwargs["device_map"] = {"": 0}
     else:
+        if DEVICE.type == "cuda" and not BITSANDBYTES_AVAILABLE and BitsAndBytesConfig is not None:
+            print(
+                "bitsandbytes package not found; falling back to full-precision loading. "
+                "Run `pip install bitsandbytes` or set TTT_FORCE_16BIT=1 to silence this warning."
+            )
         dtype = LOAD_DTYPE if DEVICE.type == "cuda" else torch.float32
         model_kwargs["torch_dtype"] = dtype
+        model_kwargs["device_map"] = None
 
     model = AutoModelForCausalLM.from_pretrained(CKPT, **model_kwargs)
 
@@ -75,7 +85,8 @@ def load_model_and_tokenizer():
         model.to(DEVICE)
 
     model.config.pad_token_id = tokenizer.pad_token_id
-    model.gradient_checkpointing_enable(use_reentrant=False)
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable(use_reentrant=False)
     return tokenizer, model
 
 
@@ -178,20 +189,26 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
     model.config.use_cache = True
 
 
-tokenizer, model = load_model_and_tokenizer()
-num_params = getattr(model, "num_parameters", lambda: None)()
-if num_params is not None:
-    print(f"Loaded {num_params / 1e6:.0f}M parameters on {DEVICE}.")
-else:
-    print("Model loaded (quantized), parameter count unavailable.")
+def main():
+    tokenizer, model = load_model_and_tokenizer()
+    param_fn = getattr(model, "num_parameters", None)
+    num_params = param_fn() if callable(param_fn) else None
+    if num_params is not None:
+        print(f"Loaded {num_params / 1e6:.0f}M parameters on {DEVICE}.")
+    else:
+        print("Model loaded (quantized), parameter count unavailable.")
 
-print("\nBaseline response:")
-baseline = generate_response(model, tokenizer, TEST_QUESTION)
-print(baseline)
+    print("\nBaseline response:")
+    baseline = generate_response(model, tokenizer, TEST_QUESTION)
+    print(baseline)
 
-print("\nRunning test-time training...")
-run_test_time_training(model, tokenizer, TTT_SAMPLES)
+    print("\nRunning test-time training...")
+    run_test_time_training(model, tokenizer, TTT_SAMPLES)
 
-print("\nAdapted response:")
-adapted = generate_response(model, tokenizer, TEST_QUESTION)
-print(adapted)
+    print("\nAdapted response:")
+    adapted = generate_response(model, tokenizer, TEST_QUESTION)
+    print(adapted)
+
+
+if __name__ == "__main__":
+    main()
