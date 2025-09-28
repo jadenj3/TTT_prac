@@ -64,8 +64,8 @@ print("TEST-TIME TRAINING")
 print("="*50)
 
 # Simple training setup
-learning_rate = 3e-5
-num_steps = 5
+learning_rate = 1e-7  # MUCH smaller - NaNs suggest we're destroying weights
+num_steps = 20  # More steps with tiny LR
 
 # Memory-efficient: Only train last few transformer layers
 for param in model.parameters():
@@ -82,7 +82,8 @@ for param in model.lm_head.parameters():
 trainable_params = [p for p in model.parameters() if p.requires_grad]
 print(f"Training {len(trainable_params)} parameter tensors")
 
-optimizer = optim.AdamW(trainable_params, lr=learning_rate)
+# Use SGD instead of Adam - simpler, more stable
+optimizer = optim.SGD(trainable_params, lr=learning_rate)
 
 model.train()
 for step in range(num_steps):
@@ -93,13 +94,23 @@ for step in range(num_steps):
         # Labels are the same as inputs for language modeling
         labels = inputs.input_ids.clone()
 
-        # Forward pass
-        outputs = model(input_ids=inputs.input_ids, labels=labels)
-        loss = outputs.loss
+        # Forward pass with mixed precision for stability
+        with torch.cuda.amp.autocast(dtype=DTYPE):
+            outputs = model(input_ids=inputs.input_ids, labels=labels)
+            loss = outputs.loss
+
+        # Skip if loss is already bad
+        if torch.isnan(loss) or loss.item() > 10:
+            print(f"Step {step+1}.{i+1}, Loss: {loss.item():.4f} - skipping update")
+            continue
 
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
+
+        # Clip gradients to prevent explosion
+        torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=0.1)
+
         optimizer.step()
 
         print(f"Step {step+1}.{i+1}, Loss: {loss.item():.4f}")
