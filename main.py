@@ -178,25 +178,20 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
     model.config.use_cache = True
 
 
-def main():
-    tokenizer, model = load_model_and_tokenizer()
-    num_params = getattr(model, "num_parameters", lambda: None)()
-    if num_params is not None:
-        print(f"Loaded {num_params / 1e6:.0f}M parameters on {DEVICE}.")
-    else:
-        print("Model loaded (quantized), parameter count unavailable.")
+tokenizer, model = load_model_and_tokenizer()
+num_params = getattr(model, "num_parameters", lambda: None)()
+if num_params is not None:
+    print(f"Loaded {num_params / 1e6:.0f}M parameters on {DEVICE}.")
+else:
+    print("Model loaded (quantized), parameter count unavailable.")
 
-    print("\nBaseline response:")
-    baseline = generate_response(model, tokenizer, TEST_QUESTION)
-    print(baseline)
+print("\nBaseline response:")
+baseline = generate_response(model, tokenizer, TEST_QUESTION)
+print(baseline)
 
-    print("\nRunning test-time training...")
-    run_test_time_training(model, tokenizer, TTT_SAMPLES)
+print("\nRunning test-time training...")
+run_test_time_training(model, tokenizer, TTT_SAMPLES)
 
-    print("\nAdapted response:")
-    adapted = generate_response(model, tokenizer, TEST_QUESTION)
-    print(adapted)
-
-
-if __name__ == "__main__":
-    main()
+print("\nAdapted response:")
+adapted = generate_response(model, tokenizer, TEST_QUESTION)
+print(adapted)
