@@ -84,9 +84,9 @@ def generate_response(model, tokenizer, question, max_new_tokens=128):
     inputs = encode_chat(tokenizer, messages, add_generation_prompt=True)
     generation_config = GenerationConfig(
         max_new_tokens=max_new_tokens,
-        temperature=0.2,
+        temperature=0.0,
         top_p=0.9,
-        do_sample=True,
+        do_sample=False,
         pad_token_id=tokenizer.pad_token_id,
     )
     with torch.no_grad():
@@ -123,6 +123,10 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_cli
     trainable = configure_trainable_parameters(model)
     optimizer = optim.AdamW(trainable, lr=lr, eps=1e-8)
 
+    with torch.no_grad():
+        for param in trainable:
+            param.add_(0.01 * torch.randn_like(param))
+
     for step in range(steps):
         total_loss = 0.0
         for sample in samples:
@@ -139,6 +143,9 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_cli
             if not torch.isfinite(loss).all():
                 print("Skipping update due to invalid loss")
                 continue
+            sample_loss = float(loss.detach().cpu())
+            preview = sample["question"][:48] + ("..." if len(sample["question"]) > 48 else "")
+            print(f"    loss for '{preview}': {sample_loss:.4f}")
             loss.backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(trainable, max_norm=grad_clip)
@@ -153,14 +160,13 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_cli
                     optimizer.state.clear()
                     print("Restored LM head weights due to non-finite values")
                     continue
-            total_loss += float(loss.detach().cpu())
+            total_loss += sample_loss
 
         average_loss = total_loss / max(1, len(samples))
         print(f"TTT step {step + 1}: average loss = {average_loss:.4f}")
 
     model.eval()
     model.config.use_cache = True
-
 
 def main():
     tokenizer, model = load_model_and_tokenizer()
