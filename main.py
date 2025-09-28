@@ -64,11 +64,25 @@ print("TEST-TIME TRAINING")
 print("="*50)
 
 # Simple training setup
-learning_rate = 1e-5  # Small learning rate for full model
-num_steps = 5  # Fewer steps since we're updating the whole model
+learning_rate = 3e-5
+num_steps = 5
 
-# Train all parameters (standard TTT)
-optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+# Memory-efficient: Only train last few transformer layers
+for param in model.parameters():
+    param.requires_grad = False
+
+# Enable gradients for last 2 transformer layers + lm_head
+for i in range(len(model.model.layers) - 2, len(model.model.layers)):
+    for param in model.model.layers[i].parameters():
+        param.requires_grad = True
+for param in model.lm_head.parameters():
+    param.requires_grad = True
+
+# Only optimize parameters that require gradients
+trainable_params = [p for p in model.parameters() if p.requires_grad]
+print(f"Training {len(trainable_params)} parameter tensors")
+
+optimizer = optim.AdamW(trainable_params, lr=learning_rate)
 
 model.train()
 for step in range(num_steps):
