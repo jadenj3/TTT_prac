@@ -1,14 +1,14 @@
 import torch
 from torch import nn, optim
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch.nn.functional as F
 
 # ============== Setup ==============
 CKPT = "Qwen/Qwen2.5-7B-Instruct"        # or "Qwen/Qwen1.5-0.5B"
 DTYPE = torch.float16           # bfloat16 also works on A100/H100
 
 tokenizer = AutoTokenizer.from_pretrained(CKPT, trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
 model = AutoModelForCausalLM.from_pretrained(
     CKPT,
@@ -17,147 +17,92 @@ model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
 )
 
-print(f"Loaded {model.num_parameters()/1e6:.0f} M params")
+print(f"Loaded {model.num_parameters()/1e9:.1f}B params")
 device = torch.device("cuda")
 
-# ============== TTT Task: Reverse Acronym Expansion ==============
-# This task requires learning a specific uncommon expansion pattern from examples
+# ============== TTT Task: Simple Pattern Learning ==============
+# Teaching the model a simple substitution cipher pattern
 
 TTT_SAMPLES = [
-    {
-        "input": "What does NASA stand for in our special coding system?\n\nIn our system:\n- IBM = Intelligent Business Machines\n- FBI = Federal Bureau of Investigation\n- NASA = ?",
-        "target": "NASA = Neural Architecture Search Algorithm"
-    },
-    {
-        "input": "Expand the acronym CIA in our special coding system.\n\nIn our system:\n- WHO = World Health Organization\n- CIA = ?",
-        "target": "CIA = Computational Intelligence Architecture"
-    },
-    {
-        "input": "What is the expansion of GPU in our special coding system?\n\nIn our system:\n- CPU = Central Processing Unit\n- GPU = ?",
-        "target": "GPU = Gradient Propagation Unit"
-    },
+    "In our code: 'cat' means 'dog' and 'dog' means 'cat'",
+    "In our code: 'yes' means 'no' and 'no' means 'yes'",
+    "In our code: 'up' means 'down' and 'down' means 'up'",
+    "In our code: 'left' means 'right' and 'right' means 'left'"
 ]
 
-TEST_PROMPT = """What does API stand for in our special coding system?
-
-In our system:
-- SQL = Structured Query Language
-- API = ?
-
-Based on the pattern, API stands for:"""
+TEST_PROMPT = "In our code: 'hot' means 'cold'. Question: What does 'hot' mean in our code? Answer:"
 
 # ============== Helper Functions ==============
-def prepare_batch(samples, tokenizer, device):
-    """Prepare training batch with proper padding and attention masks."""
-    texts = []
-    for sample in samples:
-        text = f"{sample['input']}\n\nAnswer: {sample['target']}"
-        texts.append(text)
-
-    inputs = tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512
-    ).to(device)
-
-    # Create labels (shift by 1 for next-token prediction)
-    labels = inputs.input_ids.clone()
-
-    # Mask padding tokens in labels
-    labels[labels == tokenizer.pad_token_id] = -100
-
-    return inputs, labels
-
-def generate_response(model, tokenizer, prompt, max_new_tokens=50, temperature=0.0):
-    """Generate model response with controlled decoding."""
+def generate_response(model, tokenizer, prompt, max_new_tokens=20):
+    """Generate model response."""
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=False if temperature == 0 else True,
+            temperature=0.0,  # Deterministic
+            do_sample=False,
             pad_token_id=tokenizer.pad_token_id
         )
 
     response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-    return response
+    return response.strip()
 
 # ============== Baseline Inference ==============
 print("\n" + "="*50)
-print("BASELINE INFERENCE (Before TTT)")
+print("BASELINE (Before TTT)")
 print("="*50)
 
 baseline_response = generate_response(model, tokenizer, TEST_PROMPT)
-print(f"Prompt: {TEST_PROMPT}")
-print(f"Baseline Answer: {baseline_response}")
+print(f"Test: {TEST_PROMPT}")
+print(f"Model says: {baseline_response}")
 
 # ============== Test-Time Training ==============
 print("\n" + "="*50)
 print("TEST-TIME TRAINING")
 print("="*50)
 
-# TTT hyperparameters
-learning_rate = 5e-5
-num_epochs = 3
-grad_clip = 1.0
+# Simple training setup
+learning_rate = 1e-5  # Small learning rate for full model
+num_steps = 5  # Fewer steps since we're updating the whole model
 
-# Prepare optimizer (only optimize the LM head for stability)
-trainable_params = [p for p in model.lm_head.parameters()]
-optimizer = optim.AdamW(trainable_params, lr=learning_rate)
-
-# Store original weights for potential rollback
-original_lm_head = model.lm_head.weight.clone()
+# Train all parameters (standard TTT)
+optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
 model.train()
-for epoch in range(num_epochs):
-    print(f"\nEpoch {epoch + 1}/{num_epochs}")
+for step in range(num_steps):
+    for i, sample_text in enumerate(TTT_SAMPLES):
+        # Tokenize the full example
+        inputs = tokenizer(sample_text, return_tensors="pt", truncation=True, max_length=128).to(device)
 
-    # Prepare batch
-    inputs, labels = prepare_batch(TTT_SAMPLES, tokenizer, device)
+        # Labels are the same as inputs for language modeling
+        labels = inputs.input_ids.clone()
 
-    # Forward pass
-    outputs = model(
-        input_ids=inputs.input_ids,
-        attention_mask=inputs.attention_mask,
-        labels=labels
-    )
+        # Forward pass
+        outputs = model(input_ids=inputs.input_ids, labels=labels)
+        loss = outputs.loss
 
-    loss = outputs.loss
-    print(f"Loss: {loss.item():.4f}")
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    # Backward pass
-    optimizer.zero_grad()
-    loss.backward()
-
-    # Gradient clipping for stability
-    torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
-
-    # Update weights
-    optimizer.step()
-
-    # Check for NaN and rollback if needed
-    if torch.isnan(loss):
-        print("NaN detected, rolling back weights...")
-        model.lm_head.weight.data = original_lm_head.clone()
-        break
+        print(f"Step {step+1}.{i+1}, Loss: {loss.item():.4f}")
 
 # ============== Adapted Inference ==============
 print("\n" + "="*50)
-print("ADAPTED INFERENCE (After TTT)")
+print("ADAPTED (After TTT)")
 print("="*50)
 
 model.eval()
 adapted_response = generate_response(model, tokenizer, TEST_PROMPT)
-print(f"Prompt: {TEST_PROMPT}")
-print(f"Adapted Answer: {adapted_response}")
+print(f"Test: {TEST_PROMPT}")
+print(f"Model says: {adapted_response}")
 
 print("\n" + "="*50)
-print("COMPARISON")
+print("SUMMARY")
 print("="*50)
-print(f"Before TTT: {baseline_response}")
-print(f"After TTT:  {adapted_response}")
-print(f"Expected:   Adaptive Programming Interface or similar technical expansion")
+print(f"Before: {baseline_response}")
+print(f"After:  {adapted_response}")
+print(f"Expected: cold")
