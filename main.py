@@ -117,17 +117,15 @@ def configure_trainable_parameters(model):
     return trainable
 
 
-def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
+def run_test_time_training(model, tokenizer, samples, steps=3, lr=1e-5, grad_clip=1.0):
     model.train()
     model.config.use_cache = False
     trainable = configure_trainable_parameters(model)
-    optimizer = optim.AdamW(trainable, lr=lr)
-    use_autocast = DEVICE.type == "cuda" and LOAD_DTYPE in (torch.float16, torch.bfloat16)
-    autocast_ctx = (
-        torch.amp.autocast("cuda", dtype=LOAD_DTYPE)
-        if use_autocast
-        else nullcontext()
-    )
+    model.lm_head = model.lm_head.to(torch.float32)
+    for param in trainable:
+        param.data = param.data.float()
+
+    optimizer = optim.AdamW(trainable, lr=lr, eps=1e-8)
 
     for step in range(steps):
         total_loss = 0.0
@@ -139,14 +137,18 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
             batch = mask_prompt_tokens(full_inputs, prompt_length)
 
             optimizer.zero_grad(set_to_none=True)
-            with autocast_ctx:
-                outputs = model(**batch)
-                loss = outputs.loss
+            outputs = model(**batch)
+            loss = outputs.loss.float()
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("Skipping update due to invalid loss")
+                continue
             loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(trainable, max_norm=grad_clip)
             optimizer.step()
             total_loss += loss.item()
 
-        average_loss = total_loss / len(samples)
+        average_loss = total_loss / max(1, len(samples))
         print(f"TTT step {step + 1}: average loss = {average_loss:.4f}")
 
     model.eval()
