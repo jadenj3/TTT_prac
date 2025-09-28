@@ -73,6 +73,14 @@ def encode_chat(tokenizer, messages, add_generation_prompt):
         add_generation_prompt=add_generation_prompt,
         return_tensors="pt",
     )
+
+    if isinstance(encoded, torch.Tensor):
+        encoded = {"input_ids": encoded}
+    elif hasattr(encoded, "to_dict"):
+        encoded = dict(encoded.to_dict())
+    else:
+        encoded = dict(encoded)
+
     if "attention_mask" not in encoded:
         encoded["attention_mask"] = torch.ones_like(encoded["input_ids"])
     return to_device(encoded)
