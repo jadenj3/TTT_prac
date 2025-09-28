@@ -93,6 +93,7 @@ def generate_response(model, tokenizer, question, max_new_tokens=128):
         max_new_tokens=max_new_tokens,
         temperature=0.2,
         top_p=0.9,
+        do_sample=True,
         pad_token_id=tokenizer.pad_token_id,
     )
     with torch.no_grad():
@@ -128,9 +129,13 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
     model.config.use_cache = False
     trainable = configure_trainable_parameters(model)
     optimizer = optim.AdamW(trainable, lr=lr)
-    scaler = torch.cuda.amp.GradScaler(enabled=DEVICE.type == "cuda")
+    scaler = (
+        torch.amp.GradScaler('cuda', enabled=True)
+        if DEVICE.type == "cuda"
+        else None
+    )
     autocast_ctx = (
-        torch.cuda.amp.autocast(device_type="cuda", dtype=LOAD_DTYPE)
+        torch.amp.autocast("cuda", dtype=LOAD_DTYPE)
         if DEVICE.type == "cuda"
         else nullcontext()
     )
@@ -148,9 +153,13 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-5):
             with autocast_ctx:
                 outputs = model(**batch)
                 loss = outputs.loss
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             total_loss += loss.item()
 
         average_loss = total_loss / len(samples)
