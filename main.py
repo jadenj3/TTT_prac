@@ -1,34 +1,11 @@
-import os
-from contextlib import nullcontext
-
 import torch
+from contextlib import nullcontext
 from torch import optim
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
-try:
-    from transformers import BitsAndBytesConfig
-except ImportError:  # pragma: no cover - optional dependency
-    BitsAndBytesConfig = None  # type: ignore[assignment]
-
-try:
-    import bitsandbytes as bnb  # noqa: F401
-except ImportError:  # pragma: no cover - optional dependency
-    BITSANDBYTES_AVAILABLE = False
-else:
-    BITSANDBYTES_AVAILABLE = True
-
-# -----------------------------------------------------------------------------
-# Configuration knobs (tweak these to fit your Colab runtime)
-# -----------------------------------------------------------------------------
-CKPT = "Qwen/Qwen2.5-14B-Instruct"
+CKPT = "Qwen/Qwen2.5-7B-Instruct"
 LOAD_DTYPE = torch.float16
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-USE_4BIT = (
-    DEVICE.type == "cuda"
-    and BitsAndBytesConfig is not None
-    and BITSANDBYTES_AVAILABLE
-    and os.environ.get("TTT_FORCE_16BIT", "0") != "1"
-)
 SYSTEM_MESSAGE = (
     "You are a concise tutor helping players learn the expedition glossary. "
     "When a user asks for a translation, answer with the dictionary term only."
@@ -58,35 +35,21 @@ def load_model_and_tokenizer():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs = {"trust_remote_code": True}
-    if USE_4BIT:
-        print("Loading model in 4-bit NF4 precision to conserve memory…")
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-        model_kwargs["quantization_config"] = quant_config
-        model_kwargs["device_map"] = {"": 0}
-    else:
-        if DEVICE.type == "cuda" and not BITSANDBYTES_AVAILABLE and BitsAndBytesConfig is not None:
-            print(
-                "bitsandbytes package not found; falling back to full-precision loading. "
-                "Run `pip install bitsandbytes` or set TTT_FORCE_16BIT=1 to silence this warning."
-            )
-        dtype = LOAD_DTYPE if DEVICE.type == "cuda" else torch.float32
-        model_kwargs["torch_dtype"] = dtype
-        model_kwargs["device_map"] = None
-
-    model = AutoModelForCausalLM.from_pretrained(CKPT, **model_kwargs)
-
-    if not USE_4BIT:
-        model.to(DEVICE)
-
+    dtype = LOAD_DTYPE if DEVICE.type == "cuda" else torch.float32
+    model = AutoModelForCausalLM.from_pretrained(
+        CKPT,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
+    model.to(DEVICE)
     model.config.pad_token_id = tokenizer.pad_token_id
+
     if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable(use_reentrant=False)
+        try:
+            model.gradient_checkpointing_enable(use_reentrant=False)
+        except TypeError:
+            model.gradient_checkpointing_enable()
+
     return tokenizer, model
 
 
@@ -148,7 +111,7 @@ def configure_trainable_parameters(model):
         if requires_grad:
             trainable.append(param)
     if not trainable:
-        raise RuntimeError("No trainable parameters found on lm_head; check quantization setup.")
+        raise RuntimeError("No trainable parameters found on lm_head; check model config.")
     return trainable
 
 
@@ -196,7 +159,7 @@ def main():
     if num_params is not None:
         print(f"Loaded {num_params / 1e6:.0f}M parameters on {DEVICE}.")
     else:
-        print("Model loaded (quantized), parameter count unavailable.")
+        print("Model loaded; parameter count unavailable.")
 
     print("\nBaseline response:")
     baseline = generate_response(model, tokenizer, TEST_QUESTION)
