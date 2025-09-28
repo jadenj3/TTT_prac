@@ -132,6 +132,7 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_cli
             prompt_length = prompt_inputs["input_ids"].size(-1)
             batch = mask_prompt_tokens(full_inputs, prompt_length)
 
+            snapshots = [p.data.detach().clone() for p in trainable]
             optimizer.zero_grad(set_to_none=True)
             outputs = model(**batch)
             loss = outputs.loss
@@ -142,6 +143,16 @@ def run_test_time_training(model, tokenizer, samples, steps=3, lr=5e-6, grad_cli
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(trainable, max_norm=grad_clip)
             optimizer.step()
+            with torch.no_grad():
+                restored = False
+                for snapshot, param in zip(snapshots, trainable):
+                    if not torch.isfinite(param).all():
+                        param.data.copy_(snapshot)
+                        restored = True
+                if restored:
+                    optimizer.state.clear()
+                    print("Restored LM head weights due to non-finite values")
+                    continue
             total_loss += float(loss.detach().cpu())
 
         average_loss = total_loss / max(1, len(samples))
